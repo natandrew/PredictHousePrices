@@ -8,6 +8,22 @@
 
 This repository contains an experiment that trains and evaluates linear models to predict house prices using the classic `boston` dataset from `openml` (accessed with `sklearn.datasets.fetch_openml`). The work is implemented in a Jupyter notebook and demonstrates a reproducible machine-learning pipeline: imputation, scaling, model fitting, and hyperparameter tuning using `GridSearchCV`.
 
+## Demo
+
+A live interactive demo is available via Streamlit. The demo allows you to change the input features (same features used in the notebook) and see predicted median house price.
+
+**Run locally**
+
+```bash
+# (recommended) create venv and install requirements
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+# run the app
+streamlit run streamlit_app.py
+
 ## What you'll find here
 
 * A Jupyter notebook that:
