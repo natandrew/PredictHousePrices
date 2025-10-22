@@ -150,12 +150,58 @@ def train_and_save_model(X, y):
     joblib.dump({"model": best, "metadata": metadata}, MODEL_PATH)
     return best, metadata
 
+def build_input_ui(stats):
+    """
+    Create sidebar sliders from `stats` dict and return a single-row DataFrame
+    with the selected input values.
+    `stats` expected format: {feature: {"min":..,"max":..,"median":..}, ...}
+    """
+    st.sidebar.header("Input features")
+    inputs = {}
+    for feat, s in stats.items():
+        # Defensive: ensure numeric bounds exist
+        try:
+            min_v = float(s.get("min", 0.0))
+            max_v = float(s.get("max", min_v + 1.0))
+            median_v = float(s.get("median", (min_v + max_v) / 2.0))
+        except Exception:
+            min_v, max_v, median_v = 0.0, 1.0, 0.5
+
+        # sensible step
+        rng = max_v - min_v
+        step = max(rng / 200.0, 0.01)
+
+        # Use slider (for wide ranges, slider still works)
+        inputs[feat] = st.sidebar.slider(
+            label=feat,
+            min_value=min_v,
+            max_value=max_v,
+            value=median_v,
+            step=step
+        )
+
+    # return as single-row DataFrame with columns in original order
+    return pd.DataFrame([inputs])
+
+
 def main():
     st.set_page_config(page_title="PredictHousePrices — Demo", layout="wide")
     st.title("🏠 PredictHousePrices — Interactive demo")
-    st.markdown("Small demo that predicts Boston house prices using a Ridge model. Use the sidebar to change feature values and see predictions.")
+    st.markdown("Small demo that predicts Boston house prices. Use the sidebar to change feature values and see predictions.")
 
-    model, metadata, stats, X, y, _ = load_or_train()
+    # load_or_train might return either 5 or 6 values depending on which patch you used.
+    loaded = load_or_train()
+    # Support both signatures gracefully:
+    if isinstance(loaded, tuple) and len(loaded) >= 5:
+        model, metadata, stats, X, y = loaded[:5]
+        # optional 'source' if present is at index 5
+        source = loaded[5] if len(loaded) > 5 else None
+    else:
+        raise RuntimeError("load_or_train() returned unexpected result. Expected tuple with at least 5 elements.")
+
+    # show dataset source (if available)
+    if source:
+        st.sidebar.write(f"Data source: {source}")
 
     st.sidebar.markdown("### Model info")
     if metadata:
@@ -166,6 +212,7 @@ def main():
     else:
         st.sidebar.write("Model metadata not available.")
 
+    # build UI (this uses the build_input_ui defined above)
     input_df = build_input_ui(stats)
     st.subheader("Input")
     st.dataframe(input_df.T, height=200)
@@ -183,13 +230,11 @@ def main():
     st.write(f"Samples: {len(X)}")
     st.dataframe(pd.concat([X.describe().T[["min","50%","max"]].rename(columns={"50%":"median"})], axis=1))
 
-    st.markdown("---")
-    st.caption("Notes: The app will train and save a `model.pkl` on first run if none exists. Training is small but may take a few seconds on cold start.")
-
-    # Allow download of the saved model
+    # download model button if exists
     if os.path.exists(MODEL_PATH):
         with open(MODEL_PATH, "rb") as f:
             st.download_button("Download saved model (model.pkl)", f, file_name="model.pkl")
+
 
 if __name__ == "__main__":
     main()
