@@ -14,23 +14,116 @@ import os
 
 MODEL_PATH = "model.pkl"
 
+import os
+from urllib.error import URLError
+from http.client import RemoteDisconnected
+from sklearn.datasets import fetch_openml
+
+DATA_CSV = os.path.join("data", "boston.csv")  # repo path fallback
+MODEL_PATH = "model.pkl"
+
 @st.cache_data(show_spinner=False)
 def load_dataset():
-    boston = fetch_openml(name="boston", version=1, as_frame=True)
-    X = boston.data.copy()
-    y = boston.target.astype(float).copy()
-    mask = ~y.isna()
-    X = X.loc[mask].reset_index(drop=True)
-    y = y.loc[mask].reset_index(drop=True)
+    """
+    Try to fetch from OpenML. If it fails (network error, remote disconnect, etc.),
+    try to load a local CSV at data/boston.csv. If neither exists, raise a helpful error.
+    """
+    # First try OpenML
+    try:
+        boston = fetch_openml(name="boston", version=1, as_frame=True)
+        X = boston.data.copy()
+        y = boston.target.astype(float).copy()
+        mask = ~y.isna()
+        X = X.loc[mask].reset_index(drop=True)
+        y = y.loc[mask].reset_index(drop=True)
+        source = "openml"
+    except (URLError, RemoteDisconnected, TimeoutError, Exception) as e:
+        # Generic Exception catch here so any fetch_openml network failure falls back.
+        st.warning(
+            "Could not fetch Boston dataset from OpenML (network error). "
+            "Falling back to local dataset if available. "
+            "To avoid this, add `data/boston.csv` to the repo or commit a `model.pkl`."
+        )
+        if os.path.exists(DATA_CSV):
+            df = pd.read_csv(DATA_CSV)
+            # Expect target column named 'target' or 'MEDV' — try common names
+            if "target" in df.columns:
+                y = df["target"].astype(float).reset_index(drop=True)
+                X = df.drop(columns=["target"]).reset_index(drop=True)
+            elif "MEDV" in df.columns:
+                y = df["MEDV"].astype(float).reset_index(drop=True)
+                X = df.drop(columns=["MEDV"]).reset_index(drop=True)
+            else:
+                # if target column is last column
+                y = df.iloc[:, -1].astype(float).reset_index(drop=True)
+                X = df.iloc[:, :-1].reset_index(drop=True)
+            source = "local_csv"
+        else:
+            # No local fallback available — raise an informative error
+            raise RuntimeError(
+                "Failed to fetch the Boston dataset from OpenML and no local "
+                "data/boston.csv was found in the repository. "
+                "Add data/boston.csv or commit model.pkl to skip training."
+            ) from e
+
     # compute simple per-feature stats for slider bounds
     stats = {}
     for col in X.columns:
-        stats[col] = {
-            "min": float(X[col].min()),
-            "max": float(X[col].max()),
-            "median": float(X[col].median())
-        }
-    return X, y, stats
+        try:
+            stats[col] = {
+                "min": float(X[col].min()),
+                "max": float(X[col].max()),
+                "median": float(X[col].median())
+            }
+        except Exception:
+            # For non-numeric columns, skip or attempt conversion
+            stats[col] = {"min": 0.0, "max": 1.0, "median": 0.5}
+
+    return X, y, stats, source
+
+@st.cache_resource(show_spinner=False)
+def load_or_train():
+    """
+    Load dataset using load_dataset(). If model.pkl exists, load it.
+    Otherwise, train (as before) and save model.pkl.
+    """
+    X, y, stats, source = load_dataset()
+
+    # If a model file already exists, load it and return immediately
+    if os.path.exists(MODEL_PATH):
+        try:
+            data = joblib.load(MODEL_PATH)
+            model = data["model"] if isinstance(data, dict) and "model" in data else data
+            metadata = data.get("metadata", {}) if isinstance(data, dict) else {}
+            return model, metadata, stats, X, y, source
+        except Exception as e:
+            st.warning(f"Found {MODEL_PATH} but failed to load it: {e}. Will retrain model.")
+            # fall-through to training
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    pipe = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("scaler", StandardScaler()),
+        ("model", Ridge())
+    ])
+
+    param_grid = {"model__alpha": np.logspace(-4, 4, 25)}
+    gs = GridSearchCV(pipe, param_grid, cv=5, scoring="neg_mean_squared_error", n_jobs=-1)
+    gs.fit(X_train, y_train)
+
+    best = gs.best_estimator_
+    # Evaluate on test set
+    y_pred = best.predict(X_test)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    r2 = r2_score(y_test, y_pred)
+    mae = mean_absolute_error(y_test, y_pred)
+
+    metadata = {"rmse": float(rmse), "r2": float(r2), "mae": float(mae), "best_params": gs.best_params_}
+    # Save the model and metadata
+    joblib.dump({"model": best, "metadata": metadata}, MODEL_PATH)
+
+    return best, metadata, stats, X, y, source
 
 def train_and_save_model(X, y):
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -57,40 +150,12 @@ def train_and_save_model(X, y):
     joblib.dump({"model": best, "metadata": metadata}, MODEL_PATH)
     return best, metadata
 
-@st.cache_resource(show_spinner=False)
-def load_or_train():
-    X, y, stats = load_dataset()
-    if os.path.exists(MODEL_PATH):
-        data = joblib.load(MODEL_PATH)
-        model = data["model"]
-        metadata = data.get("metadata", {})
-        return model, metadata, stats, X, y
-    else:
-        model, metadata = train_and_save_model(X, y)
-        return model, metadata, stats, X, y
-
-def build_input_ui(stats):
-    st.sidebar.header("Input features")
-    inputs = {}
-    for feat, s in stats.items():
-        # use a sensible step for sliders
-        rng = s["max"] - s["min"]
-        step = max(rng/200.0, 0.01)
-        inputs[feat] = st.sidebar.slider(
-            label=feat,
-            min_value=s["min"],
-            max_value=s["max"],
-            value=s["median"],
-            step=step
-        )
-    return pd.DataFrame([inputs])
-
 def main():
     st.set_page_config(page_title="PredictHousePrices — Demo", layout="wide")
     st.title("🏠 PredictHousePrices — Interactive demo")
     st.markdown("Small demo that predicts Boston house prices using a Ridge model. Use the sidebar to change feature values and see predictions.")
 
-    model, metadata, stats, X, y = load_or_train()
+    model, metadata, stats, X, y, _ = load_or_train()
 
     st.sidebar.markdown("### Model info")
     if metadata:
